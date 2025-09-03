@@ -1,0 +1,33 @@
+# Stop node daemon
+sudo systemctl stop slurmd
+
+# Detect topology
+HOST=$(hostname -s)
+IP=$(getent hosts "$HOST" | awk '{print $1}' | head -n1)
+SOCKETS=$(lscpu | awk -F: '/Socket\(s\)/{gsub(/ /,"",$2);print $2}')
+CORES_PER_SOCKET=$(lscpu | awk -F: '/Core\(s\) per socket/{gsub(/ /,"",$2);print $2}')
+THREADS_PER_CORE=$(lscpu | awk -F: '/Thread\(s\) per core/{gsub(/ /,"",$2);print $2}')
+MEM_MB=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
+GPUS=$(nvidia-smi -L 2>/dev/null | grep -c '^GPU ')
+
+echo "Topology: Sockets=$SOCKETS  Cores/Socket=$CORES_PER_SOCKET  Threads/Core=$THREADS_PER_CORE  GPUs=$GPUS  MemMiB=$MEM_MB"
+
+# Rewrite the NodeName line with explicit geometry (this is the key fix)
+sudo sed -i '/^NodeName=/d' /etc/slurm/slurm.conf
+sudo tee -a /etc/slurm/slurm.conf >/dev/null <<EOF
+NodeName=$HOST NodeAddr=$IP Sockets=$SOCKETS CoresPerSocket=$CORES_PER_SOCKET ThreadsPerCore=$THREADS_PER_CORE RealMemory=$MEM_MB Gres=gpu:$GPUS State=UNKNOWN
+EOF
+
+# Ensure partition line exists and includes this node (keep your existing one if present)
+grep -q '^PartitionName=' /etc/slurm/slurm.conf || \
+  echo "PartitionName=main Nodes=$HOST Default=YES MaxTime=7-00:00:00 State=UP" | sudo tee -a /etc/slurm/slurm.conf
+
+# Restart daemons
+sudo systemctl restart slurmctld
+sudo systemctl restart slurmd
+
+# Verify
+scontrol ping
+systemctl is-active slurmd
+sinfo -o "%P %N %T %C %m %G"
+scontrol show node "$HOST" | egrep "State=|Gres=|CfgTRES=|Sockets=|CoresPerSocket=|ThreadsPerCore="
