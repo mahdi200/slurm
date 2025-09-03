@@ -1,5 +1,5 @@
-# ===== ONE-SHOT SLURM FIX (single-node controller+compute) =====
-cat >/tmp/fix_slurm.sh <<'BASH'
+cat >/tmp/repair_slurm.sh <<'EOF'
+#!/usr/bin/env bash
 set -euo pipefail
 
 HOST=lambda-hyperplane
@@ -7,51 +7,51 @@ IP=192.168.100.25
 
 say(){ printf "\n\033[1;34m[%s]\033[0m %s\n" "$(date +%H:%M:%S)" "$*"; }
 
-say "1) Fix hostname & /etc/hosts"
-sudo hostnamectl set-hostname "$HOST"
-# clean old lines, then map to LAN IP (avoid 127.0.1.1 confusion)
-sudo sed -i "/[[:space:]]$HOST\$/d" /etc/hosts
-sudo tee -a /etc/hosts >/dev/null <<EOF
-127.0.0.1   localhost
-::1         localhost ip6-localhost
-$IP         $HOST
-EOF
-getent hosts "$HOST"
+say "1) Fix /etc/hosts mapping (and keep 127.0.1.1 too)"
+sudo bash -c "sed -i '/[[:space:]]'"$HOST"'$/d' /etc/hosts"
+# keep both 127.0.1.1 and LAN IP to silence sudo + keep proper LAN mapping
+grep -q "^127\.0\.1\.1[[:space:]]\+$HOST" /etc/hosts || echo "127.0.1.1 $HOST" | sudo tee -a /etc/hosts >/dev/null
+grep -q "^$IP[[:space:]]\+$HOST" /etc/hosts || echo "$IP $HOST" | sudo tee -a /etc/hosts >/dev/null
 
-say "2) Make sure packages exist and auth is OK"
-if ! command -v slurmd >/dev/null 2>&1; then
-  if command -v apt >/dev/null 2>&1; then
-    sudo apt update && sudo apt install -y slurm-wlm slurmctld slurmd munge
-  else
-    sudo dnf install -y slurm slurmctld slurm-slurmd munge
-  fi
+say "2) Install Munge + Slurm (if missing)"
+if command -v apt >/dev/null 2>&1; then
+  sudo apt update
+  sudo apt install -y munge libmunge2 slurm-wlm slurmctld slurmd
+elif command -v dnf >/dev/null 2>&1; then
+  sudo dnf install -y munge slurm slurmctld slurm-slurmd
+else
+  echo "Unsupported distro: install munge + slurm packages manually." ; exit 1
 fi
 id -u slurm >/dev/null 2>&1 || sudo useradd -r -M -s /usr/sbin/nologin slurm
-sudo mkdir -p /etc/munge
-sudo [[ -s /etc/munge/munge.key ]] || /usr/sbin/create-munge-key -r
+
+say "3) Ensure MUNGE key/service"
+if [ ! -s /etc/munge/munge.key ]; then
+  sudo /usr/sbin/create-munge-key
+fi
+sudo chown -R munge:munge /etc/munge
+sudo chmod 600 /etc/munge/munge.key
 sudo systemctl enable --now munge
+# quick munge self-test
 munge -n | unmunge >/dev/null
 
-say "3) Prepare dirs and wipe stale controller state (cluster rename issues)"
-sudo systemctl stop slurmctld slurmd || true
-sudo mkdir -p /etc/slurm /var/spool/slurmctld /var/spool/slurmd /var/log/slurm
-sudo rm -rf /var/spool/slurmctld/*        # safe on a fresh/single-node setup
+say "4) Prepare dirs and wipe stale controller state"
+sudo systemctl stop slurmd slurmctld || true
+sudo mkdir -p /etc/slurm /var/log/slurm /var/spool/slurmctld /var/spool/slurmd
+sudo rm -rf /var/spool/slurmctld/*        # safe on single-node
 sudo chown -R slurm:slurm /var/spool/slurmctld /var/spool/slurmd /var/log/slurm
 
-say "4) Auto-detect real topology"
+say "5) Detect real CPU/GPU topology"
 SOCKETS=$(lscpu | awk -F: '/Socket\(s\)/{gsub(/ /,"",$2);print $2}')
 CORES_PER_SOCKET=$(lscpu | awk -F: '/Core\(s\) per socket/{gsub(/ /,"",$2);print $2}')
 THREADS_PER_CORE=$(lscpu | awk -F: '/Thread\(s\) per core/{gsub(/ /,"",$2);print $2}')
 MEM_MB=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
 GPU_COUNT=$(nvidia-smi -L 2>/dev/null | grep -c '^GPU ' || true)
-echo "Detected: S=$SOCKETS C/S=$CORES_PER_SOCKET T/C=$THREADS_PER_CORE  MemMiB=$MEM_MB  GPUs=$GPU_COUNT"
+echo "Detected: sockets=$SOCKETS, cores/socket=$CORES_PER_SOCKET, threads/core=$THREADS_PER_CORE, memMiB=$MEM_MB, gpus=$GPU_COUNT"
 
-say "5) Write clean /etc/slurm/slurm.conf (explicit geometry)"
-sudo tee /etc/slurm/slurm.conf >/dev/null <<EOF
-# ===== Minimal single-node config =====
+say "6) Write clean /etc/slurm/slurm.conf (explicit geometry; simple cgroups)"
+sudo tee /etc/slurm/slurm.conf >/dev/null <<CONF
 ClusterName=h100lab
 SlurmctldHost=$HOST
-ControlAddr=$IP
 SlurmctldPort=6817
 SlurmdPort=6818
 AuthType=auth/munge
@@ -65,7 +65,6 @@ SlurmdDebug=info
 ReturnToService=2
 CommunicationParameters=EnableIPv6=No
 
-# keep startup simple; cgroups can be enabled later
 ProctrackType=proctrack/linuxproc
 TaskPlugin=task/none
 
@@ -75,32 +74,30 @@ GresTypes=gpu
 
 NodeName=$HOST NodeAddr=$IP Sockets=$SOCKETS CoresPerSocket=$CORES_PER_SOCKET ThreadsPerCore=$THREADS_PER_CORE RealMemory=$MEM_MB Gres=gpu:$GPU_COUNT State=UNKNOWN
 PartitionName=main Nodes=$HOST Default=YES MaxTime=7-00:00:00 State=UP
-EOF
+CONF
 
 echo "AutoDetect=nvml" | sudo tee /etc/slurm/gres.conf >/dev/null
-sudo sed -i 's/^SLURMD_OPTIONS=.*/SLURMD_OPTIONS=""/' /etc/default/slurmd 2>/dev/null || true
+# Some distros add bad flags; clear them if present
+[ -f /etc/default/slurmd ] && sudo sed -i 's/^SLURMD_OPTIONS=.*/SLURMD_OPTIONS=""/' /etc/default/slurmd || true
 
-say "6) Start daemons"
+say "7) Start daemons"
 sudo systemctl restart slurmctld
 sudo systemctl restart slurmd || true
 
 echo "slurmctld: $(systemctl is-active slurmctld)"
 echo "slurmd   : $(systemctl is-active slurmd)"
 
-say "7) If slurmd still not active, show last errors"
-systemctl is-active slurmd >/dev/null || sudo journalctl -u slurmd -n 80 --no-pager
-
 say "8) Health"
 scontrol ping || true
-sinfo -o "%P %N %T %C %m %G"
-scontrol show node $HOST | egrep "State=|Gres=|Sockets=|CoresPerSocket=|ThreadsPerCore=|CfgTRES=|Reason="
+sinfo -o "%P %N %T %C %m %G" || true
+scontrol show node $HOST | egrep "State=|Gres=|Sockets=|CoresPerSocket=|ThreadsPerCore=|CfgTRES=|Reason=" || true
 
-say "9) Smoke test"
-if [[ "$GPU_COUNT" -gt 0 ]]; then
+say "9) Smoke job"
+if [ "$GPU_COUNT" -gt 0 ]; then
   sbatch -p main --gres=gpu:1 --wrap="hostname; nvidia-smi -L; echo '---'; nvidia-smi"
 else
   sbatch -p main --wrap="hostname; lscpu | head -n 10"
 fi
-BASH
+EOF
 
-sudo bash /tmp/fix_slurm.sh
+bash /tmp/repair_slurm.sh
