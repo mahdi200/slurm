@@ -10,7 +10,7 @@
 
 set -euo pipefail
 NGPU=${SLURM_GPUS:-${SLURM_GPUS_ON_NODE:-1}}
-echo "Allocated GPUs: $NGPU  CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+#echo "Allocated GPUs: $NGPU  CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
 # telemetry logger
 LOG=gpu_telemetry_${SLURM_JOB_ID}.csv
