@@ -1,0 +1,19 @@
+# Stop node daemon
+sudo systemctl stop slurmd
+
+# Patch NodeName and any partition node lists to the real short hostname
+H=$(hostname -s)
+sudo sed -i -E "s/^NodeName=\S+/NodeName=${H}/" /etc/slurm/slurm.conf
+sudo sed -i -E "s/(^PartitionName=\S+\s+Nodes=)\S+/\1${H}/" /etc/slurm/slurm.conf
+
+# (optional) sanity check
+grep -E '^(NodeName|PartitionName)' /etc/slurm/slurm.conf
+
+# Restart services
+sudo systemctl restart slurmctld
+sudo systemctl start slurmd
+
+# Health
+systemctl is-active slurmd
+sinfo -o "%P %N %T %G %C %m"
+scontrol show node "$H" | egrep "State=|Gres=|Sockets=|CoresPerSocket=|ThreadsPerCore="
