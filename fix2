@@ -1,0 +1,20 @@
+# 1) Stop daemons
+sudo systemctl stop slurmctld slurmd
+
+# 2) Wipe old controller state (the part that still says h100cluster)
+#    ⚠️ OK on a fresh/single-node setup; removes pending jobs/old state.
+sudo rm -rf /var/spool/slurmctld/*
+
+# 3) Ensure ownership and logs dir
+sudo chown -R slurm:slurm /var/spool/slurmctld
+sudo mkdir -p /var/log/slurm
+sudo chown -R slurm:slurm /var/log/slurm
+
+# 4) Start clean
+sudo systemctl start slurmctld
+sudo systemctl start slurmd
+
+# 5) Verify
+scontrol ping
+sinfo -o "%P %N %T %C %m %G"
+scontrol show node $(hostname -s) | egrep "State=|Gres=|CfgTRES=|Reason="
