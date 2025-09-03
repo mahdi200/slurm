@@ -1,16 +1,22 @@
-# 0) Stop services
-sudo systemctl stop slurmd slurmctld
+# 0) Stop daemons (safe to run even if down)
+sudo systemctl stop slurmctld slurmd
 
-# 1) Make sure dirs exist + perms are correct
-sudo mkdir -p /var/spool/slurmd /var/spool/slurmctld /var/log/slurm
-sudo chown -R slurm:slurm /var/spool/slurmd /var/spool/slurmctld
+# 1) MUNGE (auth) must exist & run
+sudo /usr/sbin/create-munge-key -r 2>/dev/null || true
+sudo systemctl enable --now munge
 
-# 2) Ensure hostname resolves to your IP
+# 2) Dirs + ownership
+sudo mkdir -p /var/spool/slurmctld /var/spool/slurmd /var/log/slurm /etc/slurm
+sudo chown -R slurm:slurm /var/spool/slurmctld /var/spool/slurmd /var/log/slurm
+
+# 3) Make sure hostname resolves to your LAN IP (not 127.0.1.1)
+sudo sed -i '/\blambda-hyperplane\b/d' /etc/hosts
 echo "192.168.100.25 lambda-hyperplane" | sudo tee -a /etc/hosts
+getent hosts lambda-hyperplane
 
-# 3) Minimal, clean configs (no 'auto', no typos)
+# 4) Clean, minimal configs (single node, GPUs autodetected)
 sudo bash -lc '
-HOST=$(hostname -s)
+HOST=lambda-hyperplane
 IP=192.168.100.25
 CPUS=$(nproc)
 MEM_MB=$(awk "/MemTotal/ {print int(\$2/1024)}" /proc/meminfo)
@@ -19,7 +25,7 @@ GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
 cat > /etc/slurm/slurm.conf <<EOF
 ClusterName=h100lab
 SlurmctldHost=$HOST
-ControlMachine=$HOST
+# (intentionally not setting ControlMachine to avoid the warning)
 SlurmctldPort=6817
 SlurmdPort=6818
 AuthType=auth/munge
@@ -32,29 +38,28 @@ SlurmctldDebug=info
 SlurmdDebug=info
 ReturnToService=2
 
-ProctrackType=proctrack/cgroup
-TaskPlugin=task/cgroup
+# Keep cgroups simple first; we can harden later
+ProctrackType=proctrack/linuxproc
+TaskPlugin=task/none
 SelectType=select/cons_tres
 SelectTypeParameters=CR_Core_Memory
 GresTypes=gpu
 
 NodeName=$HOST NodeAddr=$IP CPUs=$CPUS RealMemory=$MEM_MB Gres=gpu:$GPUS State=UNKNOWN
-PartitionName=main Nodes=$HOST Default=YES MaxTime=7-00:00:00 State=UP
+PartitionName=debug Nodes=$HOST Default=YES MaxTime=7-00:00:00 State=UP
 EOF
 
 echo "AutoDetect=nvml" > /etc/slurm/gres.conf
 '
 
-# 4) Clear any bad unit options (sometimes Debian sets these)
+# 5) Some distros add extra flags; clear them
 sudo sed -i 's/^SLURMD_OPTIONS=.*/SLURMD_OPTIONS=""/' /etc/default/slurmd 2>/dev/null || true
 
-# 5) Start services
-sudo systemctl enable --now munge
-sudo systemctl restart slurmd
-sudo systemctl restart slurmctld
+# 6) Start daemons
+sudo systemctl restart slurmctld slurmd
 
-# 6) Health checks
-systemctl is-active slurmd
+# 7) Health checks
 scontrol ping
-sinfo -o "%P %N %T %G %C %m"
+systemctl is-active slurmd
+sinfo -o "%P %N %T %C %m %G"
 scontrol show node $(hostname -s) | egrep "State=|Gres=|CfgTRES=|Reason="
