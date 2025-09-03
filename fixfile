@@ -1,0 +1,60 @@
+# 0) Stop services
+sudo systemctl stop slurmd slurmctld
+
+# 1) Make sure dirs exist + perms are correct
+sudo mkdir -p /var/spool/slurmd /var/spool/slurmctld /var/log/slurm
+sudo chown -R slurm:slurm /var/spool/slurmd /var/spool/slurmctld
+
+# 2) Ensure hostname resolves to your IP
+echo "192.168.100.25 lambda-hyperplane" | sudo tee -a /etc/hosts
+
+# 3) Minimal, clean configs (no 'auto', no typos)
+sudo bash -lc '
+HOST=$(hostname -s)
+IP=192.168.100.25
+CPUS=$(nproc)
+MEM_MB=$(awk "/MemTotal/ {print int(\$2/1024)}" /proc/meminfo)
+GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
+
+cat > /etc/slurm/slurm.conf <<EOF
+ClusterName=h100lab
+SlurmctldHost=$HOST
+ControlMachine=$HOST
+SlurmctldPort=6817
+SlurmdPort=6818
+AuthType=auth/munge
+SlurmUser=slurm
+StateSaveLocation=/var/spool/slurmctld
+SlurmdSpoolDir=/var/spool/slurmd
+SlurmctldLogFile=/var/log/slurm/slurmctld.log
+SlurmdLogFile=/var/log/slurm/slurmd.log
+SlurmctldDebug=info
+SlurmdDebug=info
+ReturnToService=2
+
+ProctrackType=proctrack/cgroup
+TaskPlugin=task/cgroup
+SelectType=select/cons_tres
+SelectTypeParameters=CR_Core_Memory
+GresTypes=gpu
+
+NodeName=$HOST NodeAddr=$IP CPUs=$CPUS RealMemory=$MEM_MB Gres=gpu:$GPUS State=UNKNOWN
+PartitionName=main Nodes=$HOST Default=YES MaxTime=7-00:00:00 State=UP
+EOF
+
+echo "AutoDetect=nvml" > /etc/slurm/gres.conf
+'
+
+# 4) Clear any bad unit options (sometimes Debian sets these)
+sudo sed -i 's/^SLURMD_OPTIONS=.*/SLURMD_OPTIONS=""/' /etc/default/slurmd 2>/dev/null || true
+
+# 5) Start services
+sudo systemctl enable --now munge
+sudo systemctl restart slurmd
+sudo systemctl restart slurmctld
+
+# 6) Health checks
+systemctl is-active slurmd
+scontrol ping
+sinfo -o "%P %N %T %G %C %m"
+scontrol show node $(hostname -s) | egrep "State=|Gres=|CfgTRES=|Reason="
