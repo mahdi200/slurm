@@ -1,5 +1,5 @@
 # 1 GPU (uses default 'main' partition)
-sbatch --gres=gpu:1 --wrap="hostname; nvidia-smi -L; echo '---'; nvidia-smi"
+sbatch --gres=gpu:1 --wrap="hostname; #nvidia-smi -L; echo '---'; nvidia-smi"
 squeue -u $USER
 # after it finishes:
 cat slurm-*.out
